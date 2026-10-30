@@ -75,7 +75,7 @@ jobs:
           --with-pcre --with-compat
 
         make -j$(nproc)
-        make install
+        sudo make install
 
     - name: 验证编译
       run: |
