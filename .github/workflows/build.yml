@@ -1,6 +1,8 @@
 # ============================================================
-# GitHub Actions: 编译 Angie + Tongsuo 产出离线包
-# push 到 GitHub -> 免费 Ubuntu runner 编译 -> 产出 artifact
+# GitHub Actions: 编译 Angie + Tongsuo（国密版）离线包
+# 场景：内网已有 nginx 1.30.2（OpenSSL 1.1.1k）跑在 /app/nginx
+#       Angie 装到 /app/angie-guomi（并存不覆盖）
+#       配置 100% 兼容原 nginx.conf（Angie 是 nginx fork）
 # ============================================================
 
 name: Build Angie with Tongsuo
@@ -13,7 +15,8 @@ on:
 env:
   ANGIE_VERSION: "1.12.4"
   TONGSUO_VERSION: "8.5.0"
-  PREFIX: "/usr/local/angie"
+  # 安装路径：独立目录，不覆盖原 /app/nginx
+  PREFIX: "/app/angie-guomi"
 
 jobs:
   build:
@@ -54,6 +57,12 @@ jobs:
         tar -xzf ../packages/Tongsuo-${TONGSUO_VERSION}.tar.gz
         ls -d */
 
+    # ----------------------------------------------------------
+    # 编译参数：匹配原 nginx 配置 + 加国密
+    # 原 nginx: --prefix=/app/nginx --with-http_ssl_module
+    #           --with-file-aio --with-http_realip_module
+    #           --with-http_stub_status_module
+    # ----------------------------------------------------------
     - name: 编译安装 Angie
       run: |
         cd build
@@ -72,7 +81,9 @@ jobs:
           --with-http_v2_module \
           --with-http_stub_status_module \
           --with-http_realip_module \
-          --with-pcre --with-compat
+          --with-file-aio \
+          --with-pcre \
+          --with-compat
 
         make -j$(nproc)
         sudo make install
@@ -83,31 +94,29 @@ jobs:
         ${PREFIX}/sbin/angie -v 2>&1
         echo ""
         echo "=== 编译参数 ==="
-        ${PREFIX}/sbin/angie -V 2>&1 | grep -iE "tongsuo|ntls|openssl|SM2" || echo "(无国密关键字，但不影响)"
+        ${PREFIX}/sbin/angie -V 2>&1 | head -15
         echo ""
-        echo "=== 配置测试 ==="
-        ${PREFIX}/sbin/angie -t 2>&1 || true
+        echo "=== 二进制类型 ==="
+        file "${PREFIX}/sbin/angie"
 
     - name: 打包离线包
       run: |
         OUT="angie-offline-package"
         mkdir -p "${OUT}/config" "${OUT}/scripts"
 
-        # 拷贝编译好的 Angie
+        # 拷贝编译好的 Angie 到 /app/angie-guomi（独立目录）
         cp -a "${PREFIX}" "${OUT}/angie"
-        echo "二进制类型:"
-        file "${OUT}/angie/sbin/angie"
 
-        # 拷贝配置
+        # 拷贝配置模板
         cp config/*.conf "${OUT}/config/"
 
         # 拷贝脚本
         cp scripts/install.sh "${OUT}/"
         cp scripts/00-run.sh "${OUT}/scripts/"
         cp scripts/certs/*.sh "${OUT}/scripts/"
+        cp scripts/patch-nginx-conf.sh "${OUT}/scripts/" 2>/dev/null || true
         chmod +x "${OUT}/install.sh" "${OUT}/scripts/"*.sh
 
-        # 打包
         tar -czf angie-guomi-offline.tar.gz "${OUT}"
         ls -lh angie-guomi-offline.tar.gz
 
