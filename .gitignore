@@ -1,0 +1,25 @@
+# 源码包（让 workflow 自己下载）
+/packages/*.tar.gz
+/packages/*.zip
+/packages/*.tgz
+
+# 编译产物
+/build/
+/output/
+
+# 临时文件
+*.swp
+*.swo
+*~
+.DS_Store
+/tmp/
+
+# 证书私钥（安全第一，千万不要提交到公开仓库）
+/certs/ca/*.key
+/certs/sm2/*.key
+/certs/rsa/*.key
+/certs/sm2/test-certs/*.key
+
+# IDE
+.idea/
+.vscode/

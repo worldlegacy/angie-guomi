@@ -1,0 +1,338 @@
+# ============================================================
+# GitHub Actions: 编译 Angie + Tongsuo 产出离线包
+# 流程：push 到 GitHub -> 免费 Ubuntu runner 编译 -> 产出 artifact
+# 用法：
+#   1. 在 angie-guomi 项目下创建本文件
+#   2. git init && git add -A && git commit -m "init"
+#   3. git remote add origin <你的仓库> && git push
+#   4. 到 GitHub Actions 页面下载 build artifacts
+# ============================================================
+
+name: Build Angie with Tongsuo (国密版)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:  # 也可以手动触发
+
+env:
+  ANGIE_VERSION: "1.12.4"
+  TONGSUO_VERSION: "8.5.0"
+  PREFIX: "/usr/local/angie"
+
+jobs:
+  build:
+    name: Build on Ubuntu (x86_64)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: 显示工作目录
+      run: pwd && ls -la
+
+    # ----------------------------------------------------------
+    # 1. 安装编译依赖
+    # ----------------------------------------------------------
+    - name: 安装编译依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          gcc g++ make \
+          libpcre3 libpcre3-dev \
+          zlib1g-dev \
+          perl \
+          wget curl tar
+
+    # ----------------------------------------------------------
+    # 2. 下载源码（如果 packages 目录里没有就现下）
+    # ----------------------------------------------------------
+    - name: 下载源码包
+      run: |
+        mkdir -p packages
+
+        # 检查是否已有源码包（从 release artifacts 来的）
+        if [ -f "packages/angie-${ANGIE_VERSION}.tar.gz" ]; then
+          echo "Angie 已存在，跳过下载"
+        else
+          echo "下载 Angie ${ANGIE_VERSION}..."
+          wget -c -O packages/angie-${ANGIE_VERSION}.tar.gz \
+            "https://download.angie.software/files/angie-${ANGIE_VERSION}.tar.gz" || \
+          wget -c -O packages/angie-${ANGIE_VERSION}.tar.gz \
+            "https://github.com/webserver-llc/angie/archive/refs/tags/Angie-${ANGIE_VERSION}.tar.gz"
+        fi
+
+        if [ -f "packages/Tongsuo-${TONGSUO_VERSION}.tar.gz" ]; then
+          echo "Tongsuo 已存在，跳过下载"
+        else
+          echo "下载 Tongsuo ${TONGSUO_VERSION}..."
+          wget -c -O packages/Tongsuo-${TONGSUO_VERSION}.tar.gz \
+            "https://github.com/Tongsuo-Project/Tongsuo/archive/refs/tags/${TONGSUO_VERSION}.tar.gz"
+        fi
+
+        ls -lh packages/
+
+    # ----------------------------------------------------------
+    # 3. 解压源码
+    # ----------------------------------------------------------
+    - name: 解压源码
+      run: |
+        mkdir -p build && cd build
+        tar -xzf ../packages/angie-${ANGIE_VERSION}.tar.gz
+        tar -xzf ../packages/Tongsuo-${TONGSUO_VERSION}.tar.gz
+        echo ""
+        echo "解压后的目录："
+        ls -d */
+
+    # ----------------------------------------------------------
+    # 4. 编译安装 Angie + Tongsuo（国密支持）
+    # ----------------------------------------------------------
+    - name: 编译安装 Angie（链接 Tongsuo 国密）
+      run: |
+        cd build
+
+        # 找到实际的目录名
+        ANGIE_SRC=$(ls -d angie*/ | head -1 | tr -d '/')
+        TONGSUO_SRC=$(ls -d Tongsuo*/ | head -1 | tr -d '/')
+
+        echo "Angie 源码: ${ANGIE_SRC}"
+        echo "Tongsuo 源码: ${TONGSUO_SRC}"
+
+        cd "${ANGIE_SRC}"
+
+        # 关键编译参数：--with-openssl 指向 Tongsuo，--with-ntls 启用国密
+        ./configure \
+          --prefix="${PREFIX}" \
+          --with-openssl="../${TONGSUO_SRC}" \
+          --with-openssl-opt="enable-ntls" \
+          --with-ntls \
+          --with-http_ssl_module \
+          --with-stream_ssl_module \
+          --with-http_v2_module \
+          --with-http_stub_status_module \
+          --with-http_realip_module \
+          --with-pcre \
+          --with-zlib \
+          --with-compat
+
+        echo ""
+        echo "========== configure 完成，开始 make =========="
+
+        make -j$(nproc)
+
+        echo ""
+        echo "========== make 完成，开始 make install =========="
+
+        make install
+
+    # ----------------------------------------------------------
+    # 5. 验证编译结果
+    # ----------------------------------------------------------
+    - name: 验证编译
+      run: |
+        echo ""
+        echo "========== 验证 Angie =========="
+        ls -la ${PREFIX}/
+        echo ""
+        echo "版本信息："
+        ${PREFIX}/sbin/angie -v 2>&1
+        echo ""
+        echo "编译参数（检查 NTLS/Tongsuo）："
+        ${PREFIX}/sbin/angie -V 2>&1 | head -20
+        echo ""
+        echo "配置测试："
+        ${PREFIX}/sbin/angie -t 2>&1 || true
+
+    # ----------------------------------------------------------
+    # 6. 打包离线包（整棵 prefix 目录 + 配置 + 脚本）
+    # ----------------------------------------------------------
+    - name: 打包离线包
+      run: |
+        OUTPUT_DIR="angie-offline-package"
+        mkdir -p "${OUTPUT_DIR}"
+
+        # 拷贝编译好的 Angie
+        cp -a "${PREFIX}" "${OUTPUT_DIR}/angie"
+
+        # 验证二进制类型（确保是 Linux x86_64）
+        echo "Angie 二进制类型："
+        file "${OUTPUT_DIR}/angie/sbin/angie"
+
+        # 拷贝配置模板
+        mkdir -p "${OUTPUT_DIR}/config"
+        cp -a config/*.conf "${OUTPUT_DIR}/config/"
+
+        # 拷贝部署脚本（去掉 macOS 特有的依赖）
+        mkdir -p "${OUTPUT_DIR}/scripts"
+        cp scripts/00-run.sh "${OUTPUT_DIR}/scripts/"
+        cp scripts/certs/*.sh "${OUTPUT_DIR}/scripts/"
+        chmod +x "${OUTPUT_DIR}/scripts/"*.sh
+
+        # 写一个一键安装脚本（内网用）
+        cat > "${OUTPUT_DIR}/install.sh" << 'INSTALL_EOF'
+#!/bin/bash
+# ============================================================
+# Angie 国密版 - 一键安装脚本（内网执行）
+# 用法：解压本离线包后执行 bash install.sh
+# ============================================================
+set -e
+
+PREFIX="/usr/local/angie"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo ""
+echo "===== Angie 国密版离线安装 ====="
+echo ""
+
+# 拷贝 Angie 到目标路径
+if [ -d "${PREFIX}" ]; then
+    echo "⚠️  ${PREFIX} 已存在，备份为 ${PREFIX}.bak"
+    mv "${PREFIX}" "${PREFIX}.bak.$(date +%Y%m%d%H%M%S)"
+fi
+
+cp -a "${SCRIPT_DIR}/angie" "${PREFIX}"
+
+# 配置 nginx.conf
+if [ -f "${PREFIX}/conf/nginx.conf" ]; then
+    echo "备份原有 nginx.conf"
+    cp "${PREFIX}/conf/nginx.conf" "${PREFIX}/conf/nginx.conf.bak.$(date +%Y%m%d%H%M%S)"
+fi
+cp "${SCRIPT_DIR}/config/nginx.conf" "${PREFIX}/conf/"
+cp "${SCRIPT_DIR}/config/guomi.conf" "${PREFIX}/conf/"
+
+# 创建必要的目录
+mkdir -p "${PREFIX}/conf/cert/sm2" "${PREFIX}/conf/cert/rsa" \
+         "${PREFIX}/logs" "${PREFIX}/html"
+
+# 设置权限
+chmod +x "${PREFIX}/sbin/angie"
+chmod -R 644 "${PREFIX}/conf/"*
+chmod 755 "${PREFIX}/conf/"
+
+# 创建 systemd 服务（如果存在）
+if command -v systemctl &>/dev/null; then
+    cat > /etc/systemd/system/angie.service << 'EOF'
+[Unit]
+Description=Angie Web Server (国密版)
+After=network.target
+
+[Service]
+Type=forking
+PIDFile=/usr/local/angie/logs/angie.pid
+ExecStart=/usr/local/angie/sbin/angie
+ExecReload=/usr/local/angie/sbin/angie -s reload
+ExecStop=/usr/local/angie/sbin/angie -s quit
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    echo "✓ systemd 服务已创建"
+fi
+
+# 验证
+echo ""
+echo "===== 验证安装 ====="
+${PREFIX}/sbin/angie -v 2>&1
+${PREFIX}/sbin/angie -t 2>&1 || true
+
+echo ""
+echo "🎉 安装完成！"
+echo ""
+echo "下一步："
+echo "  1. 生成国密证书（需要 Tongsuo 编译的 openssl）"
+echo "     bash scripts/03-gen-sm2-cert.sh"
+echo "  2. 部署证书"
+echo "     bash scripts/04-deploy-certs.sh"
+echo "  3. 启动 Angie"
+echo "     systemctl start angie  # 或：/usr/local/angie/sbin/angie"
+echo "  4. 测试验证"
+echo "     bash scripts/05-verify.sh"
+echo ""
+INSTALL_EOF
+        chmod +x "${OUTPUT_DIR}/install.sh"
+
+        # 打包
+        tar -czf angie-guomi-offline.tar.gz "${OUTPUT_DIR}"
+        ls -lh angie-guomi-offline.tar.gz
+        echo ""
+        echo "✅ 离线包准备完成！"
+
+    # ----------------------------------------------------------
+    # 7. 上传 artifact
+    # ----------------------------------------------------------
+    - name: 上传离线包到 Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: angie-guomi-offline-linux-x86_64
+        path: angie-guomi-offline.tar.gz
+        retention-days: 30
+
+  # ============================================================
+  # 可选：同时编译 ARM64 版本（如果内网是 ARM 机器）
+  # ============================================================
+  build-arm64:
+    name: Build on ARM64 (mac M系列 / 华为鲲鹏)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: 安装 QEMU + cross 编译工具
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-user gcc-aarch64-linux-gnu
+
+    - name: 下载源码包
+      run: |
+        wget -c -O angie.tar.gz "https://github.com/webserver-llc/angie/archive/refs/tags/Angie-${{ env.ANGIE_VERSION }}.tar.gz"
+        wget -c -O tongsuo.tar.gz "https://github.com/Tongsuo-Project/Tongsuo/archive/refs/tags/${{ env.TONGSUO_VERSION }}.tar.gz"
+
+    - name: 解压
+      run: |
+        mkdir -p build && cd build
+        tar -xzf ../angie.tar.gz
+        tar -xzf ../tongsuo.tar.gz
+
+    - name: 交叉编译 (ARM64)
+      run: |
+        cd build
+        ANGIE_SRC=$(ls -d angie*/ | head -1 | tr -d '/')
+        TONGSUO_SRC=$(ls -d Tongsuo*/ | head -1 | tr -d '/')
+        cd "${ANGIE_SRC}"
+
+        # 指定交叉编译器
+        export CC=aarch64-linux-gnu-gcc
+        export CROSS_COMPILE=aarch64-linux-gnu-
+
+        ./configure \
+          --prefix=/usr/local/angie \
+          --crossbuild=Linux:aarch64 \
+          --with-openssl="../${TONGSUO_SRC}" \
+          --with-openssl-opt="enable-ntls no-shared" \
+          --with-ntls \
+          --with-http_ssl_module \
+          --with-stream_ssl_module \
+          --with-http_v2_module \
+          --with-http_stub_status_module \
+          --without-http_xss_module \
+          --without-http_referer_module \
+          --without-http_proxy_module
+
+        make -j$(nproc)
+        make install DESTDIR=$(pwd)/../../arm64-output
+
+    - name: 打包 ARM64 离线包
+      run: |
+        cd arm64-output
+        tar -czf ../angie-guomi-offline-arm64.tar.gz .
+        cd ..
+        ls -lh angie-guomi-offline-arm64.tar.gz
+
+    - name: 上传 ARM64 artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: angie-guomi-offline-linux-arm64
+        path: angie-guomi-offline-arm64.tar.gz
+        retention-days: 30
